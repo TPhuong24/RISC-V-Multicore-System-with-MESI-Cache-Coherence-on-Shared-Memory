@@ -1,0 +1,26 @@
+// Step 1: Core 0 Đọc địa chỉ 0x00 -> Read Miss. (Sẽ đọc được 0xAABBCCDD từ RAM)
+00000083
+// Step 2: Core 0 Ghi địa chỉ 0x00 -> Write Hit (E -> M). Ghi giá trị của x1 xuống Cache
+00102023
+// NOPs: Đứng đợi Core 1. Tranh thủ nạp giá trị 0x69 vào thanh ghi x2
+00000013
+00000013
+00000013
+06900113
+00000013
+00000013
+// Step 4: Core 0 Ghi địa chỉ 0x00 -> Write Hit (S -> M). Ghi giá trị x2 (0x00000069)
+00202023
+// Step 5: Core 0 Đọc địa chỉ 0x10 -> Read Miss (Làm bia cho Core 1)
+00100083
+// NOPs: Đứng đợi Core 1 thực hiện Step 6
+00000013
+00000013
+00000013
+00000013
+00000013
+00000013
+// Step 7: Core 0 Đọc địa chỉ 0x40 (Xung đột -> Ép xả block chứa số 0x69 về RAM)
+04000083
+// Step 8: HALT vĩnh viễn
+0000006f

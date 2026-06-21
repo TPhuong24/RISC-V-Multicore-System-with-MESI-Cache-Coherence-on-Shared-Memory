@@ -1,0 +1,25 @@
+// NOPs: Đứng đợi Core 0 thực hiện xong Step 1 và Step 2
+00000013
+00000013
+00000013
+00000013
+00000013
+// Step 3: Core 1 Đọc địa chỉ 0x00 -> Snoop Read. Sẽ "giật" được data từ Core 0
+00000103
+// NOPs: Đứng đợi Core 0. Tranh thủ nạp giá trị 0x99 vào thanh ghi x3
+00000013
+00000013
+00000013
+09900193
+00000013
+00000013
+// Step 6: Core 1 Ghi địa chỉ 0x10 -> Ghi trượt hoàn toàn. Ghi giá trị x3 (0x00000099)
+00302823
+// NOPs: Đứng đợi Core 0 thực hiện chu kỳ cuối cùng
+00000013
+00000013
+00000013
+00000013
+00000013
+// Step 8: HALT vĩnh viễn
+0000006f
