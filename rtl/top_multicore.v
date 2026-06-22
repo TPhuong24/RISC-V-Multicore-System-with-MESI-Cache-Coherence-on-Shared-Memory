@@ -7,7 +7,6 @@ module top_multicore (
     input  wire clk,
     input  wire rst_n,
     
-    // ====== [CHỈNH SỬA QUAN TRỌNG]: THÊM OUTPUT ĐỂ QUARTUS KHÔNG XÓA MẠCH ======
     output wire [31:0] out_core0_wb_data,
     output wire [31:0] out_core1_wb_data
 );
