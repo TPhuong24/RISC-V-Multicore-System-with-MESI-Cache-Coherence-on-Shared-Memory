@@ -31,7 +31,7 @@ add wave -noupdate -radix hexadecimal /tb_top/c1_mem_instr
 add wave -noupdate -radix hexadecimal /tb_top/c1_mem_pc
 add wave -noupdate -radix hexadecimal /tb_top/out_core1_wb_data
 TreeUpdate [SetDefaultTree]
-WaveRestoreCursors {{Cursor 1} {636867 ps} 0}
+WaveRestoreCursors {{Cursor 1} {541940 ps} 0}
 quietly wave cursor active 1
 configure wave -namecolwidth 214
 configure wave -valuecolwidth 40
@@ -47,4 +47,4 @@ configure wave -griddelta 40
 configure wave -timeline 0
 configure wave -timelineunits ps
 update
-WaveRestoreZoom {0 ps} {1496940 ps}
+WaveRestoreZoom {329759 ps} {794823 ps}
