@@ -88,7 +88,7 @@ module cache_controller #(
     localparam BUS_READ  = 3'b001;
     localparam BUS_READX = 3'b010;
     localparam BUS_UPGR  = 3'b011;
-    localparam BUS_WB    = 3'b100; // Thêm lệnh Write-Back
+    localparam BUS_WB    = 3'b100;
 
     // Snoop commands
     localparam SNOOP_NONE  = 3'b000;
@@ -106,8 +106,8 @@ module cache_controller #(
     localparam S_FILL_DONE    = 4'd6;
     localparam S_SNOOP_HANDLE = 4'd7;
     localparam S_DONE         = 4'd8;
-    localparam S_EVICT_ARBWAIT= 4'd9;  // Chờ Bus để ghi trả
-    localparam S_EVICT        = 4'd10; // Xả data xuống RAM
+    localparam S_EVICT_ARBWAIT= 4'd9; 
+    localparam S_EVICT        = 4'd10;
 
     reg [3:0] state;
 
@@ -142,7 +142,8 @@ module cache_controller #(
     wire [TAG_BITS-1:0]    snp_tag    = cur_snoop_addr[ADDR_WIDTH-1:INDEX_BITS+OFFSET_BITS+2];
 
     reg [OFFSET_BITS-1:0] fill_cnt;
-    reg [OFFSET_BITS-1:0] evict_cnt; // Đếm số word đã đẩy về RAM
+    reg [OFFSET_BITS-1:0] evict_cnt; 
+    reg [OFFSET_BITS-1:0] snoop_cnt; // Đếm số word đã đẩy ra khi dính Snoop
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -152,9 +153,11 @@ module cache_controller #(
             saved_wen   <= 0;
             fill_cnt    <= 0;
             evict_cnt   <= 0;
+            snoop_cnt   <= 0;
         end else begin
             if (snoop_cmd != SNOOP_NONE && state != S_SNOOP_HANDLE) begin
-                state <= S_SNOOP_HANDLE;
+                state     <= S_SNOOP_HANDLE;
+                snoop_cnt <= 0; // Reset biến đếm snoop
             end else begin
                 case (state)
                     S_IDLE: begin
@@ -173,7 +176,6 @@ module cache_controller #(
                             else
                                 state <= S_HIT;
                         end else begin
-                            // Kiểm tra nếu block cũ đang bị bẩn (Dirty/Modified) -> Cần Evict
                             if (ctrl_valid_out && ctrl_mesi_out == MODIFIED) begin
                                 state <= S_EVICT_ARBWAIT;
                             end else begin
@@ -219,8 +221,25 @@ module cache_controller #(
                     end
 
                     S_FILL_DONE: state <= S_DONE;
+
                     S_DONE: state <= S_IDLE;
-                    S_SNOOP_HANDLE: state <= S_IDLE; 
+
+                    S_SNOOP_HANDLE: begin
+                        // Nếu cần xả data (MODIFIED), lặp cho đến khi hết block
+                        if (snoop_valid_out && snoop_tag_out == snp_tag && snoop_mesi_out == MODIFIED && (cur_snoop_cmd == SNOOP_READ || cur_snoop_cmd == SNOOP_READX || cur_snoop_cmd == SNOOP_UPGR)) begin
+                            if (mem_ready) begin
+                                if (snoop_cnt == BLOCK_WORDS - 1) begin
+                                    state <= S_IDLE; 
+                                end else begin
+                                    snoop_cnt <= snoop_cnt + 1;
+                                end
+                            end
+                        end else begin
+                            // Nếu không phải MODIFIED, chỉ cần cập nhật trạng thái trong 1 cycle
+                            state <= S_IDLE;
+                        end
+                    end
+                    
                     default: state <= S_IDLE;
                 endcase
             end
@@ -241,12 +260,13 @@ module cache_controller #(
 
         if ((state == S_SNOOP_HANDLE) || (cur_snoop_cmd != SNOOP_NONE)) begin
             ctrl_index  = snp_index;
-            ctrl_offset = snp_offset;
+            // Ép offset chạy theo snoop_cnt nếu đang xả block MODIFIED
+            ctrl_offset = (state == S_SNOOP_HANDLE && snoop_mesi_out == MODIFIED) ? snoop_cnt : snp_offset;
             ctrl_tag_in = snp_tag;      
             snoop_index = snp_index;
         end else if (state == S_EVICT) begin
             ctrl_index  = a_index;
-            ctrl_offset = evict_cnt; // Đọc tuần tự các word để hất văng
+            ctrl_offset = evict_cnt;
             ctrl_tag_in = a_tag;
             snoop_index = a_index;
         end else begin
@@ -279,7 +299,6 @@ module cache_controller #(
         end else if (state == S_EVICT_ARBWAIT || state == S_EVICT) begin
             bus_req  = 1'b1;
             bus_cmd  = BUS_WB;
-            // Địa chỉ eviction dựa trên block cũ
             bus_addr = {ctrl_tag_out, a_index, 4'b0000}; 
         end
 
@@ -321,7 +340,14 @@ module cache_controller #(
                 if (mem_ready) begin
                     ctrl_index  = a_index;
                     ctrl_offset = fill_cnt;
-                    ctrl_wdata  = mem_rdata;
+                    
+                    // ==========================================================
+                    // [ĐÃ SỬA LỖI DATA PATH CHỖ NÀY] 
+                    // Lấy dữ liệu trực tiếp từ snoop bus (Cache-to-Cache) 
+                    // nếu có Core khác nhả ra, ngược lại mới lấy từ RAM
+                    // ==========================================================
+                    ctrl_wdata  = other_has_copy ? other_flush_data : mem_rdata;
+                    
                     ctrl_we     = 1'b1;
                 end
             end
@@ -353,30 +379,40 @@ module cache_controller #(
                         SNOOP_READ: begin
                             if (snoop_mesi_out == MODIFIED) begin
                                 snoop_wdata_out = ctrl_rdata;
-                                ctrl_mesi_in    = SHARED;
-                                ctrl_mesi_we    = 1'b1;
-                                ctrl_dirty_we   = 1'b1;
-                                ctrl_dirty_in   = 1'b0;
-                                mem_addr        = cur_snoop_addr;
+                                mem_addr        = {cur_snoop_addr[ADDR_WIDTH-1 : OFFSET_BITS+2], snoop_cnt, 2'b00};
                                 mem_wdata       = ctrl_rdata;
                                 mem_wen         = 1'b1;
+                                
+                                if (snoop_cnt == BLOCK_WORDS - 1) begin
+                                    ctrl_mesi_in  = SHARED;
+                                    ctrl_mesi_we  = 1'b1;
+                                    ctrl_dirty_we = 1'b1;
+                                    ctrl_dirty_in = 1'b0;
+                                end
                             end else if (snoop_mesi_out == EXCLUSIVE) begin
-                                ctrl_mesi_in    = SHARED;
-                                ctrl_mesi_we    = 1'b1;
+                                ctrl_mesi_in  = SHARED;
+                                ctrl_mesi_we  = 1'b1;
                             end
                         end
-                        SNOOP_READX,
-                        SNOOP_UPGR: begin
+                        SNOOP_READX, SNOOP_UPGR: begin
                             if (snoop_mesi_out == MODIFIED) begin
                                 snoop_wdata_out = ctrl_rdata;
-                                mem_addr        = cur_snoop_addr;
+                                mem_addr        = {cur_snoop_addr[ADDR_WIDTH-1 : OFFSET_BITS+2], snoop_cnt, 2'b00};
                                 mem_wdata       = ctrl_rdata;
                                 mem_wen         = 1'b1;
+                                
+                                if (snoop_cnt == BLOCK_WORDS - 1) begin
+                                    ctrl_mesi_in  = INVALID;
+                                    ctrl_mesi_we  = 1'b1;
+                                    ctrl_dirty_we = 1'b1;
+                                    ctrl_dirty_in = 1'b0;
+                                end
+                            end else begin
+                                ctrl_mesi_in  = INVALID;
+                                ctrl_mesi_we  = 1'b1;
+                                ctrl_dirty_we = 1'b1;
+                                ctrl_dirty_in = 1'b0;
                             end
-                            ctrl_mesi_in  = INVALID;
-                            ctrl_mesi_we  = 1'b1;
-                            ctrl_dirty_we = 1'b1;
-                            ctrl_dirty_in = 1'b0;
                         end
                         default: ;
                     endcase
