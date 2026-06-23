@@ -104,9 +104,11 @@ module bus_arbiter #(
                 end 
                 else if (c0_bus_req) begin
                     c0_bus_grant <= 1'b1;
+                    last_grant   <= 1'b0; // FIX BUG: Cập nhật last_grant khi Core 0 xin Bus
                 end 
                 else if (c1_bus_req) begin
                     c1_bus_grant <= 1'b1;
+                    last_grant   <= 1'b1; // FIX BUG: Cập nhật last_grant khi Core 1 xin Bus
                 end
             end
         end
