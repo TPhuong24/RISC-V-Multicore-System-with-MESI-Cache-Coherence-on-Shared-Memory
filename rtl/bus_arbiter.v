@@ -15,6 +15,7 @@ module bus_arbiter #(
     output reg                   c0_bus_grant,
     input  wire                  c0_snoop_hit,
     input  wire [DATA_WIDTH-1:0] c0_snoop_wdata_out,
+    input  wire                  c0_snoop_busy,
     
     // Giao tiếp phía Core 1 Cache Controller (Bus & Snoop)
     input  wire [2:0]            c1_bus_cmd,
@@ -24,6 +25,7 @@ module bus_arbiter #(
     output reg                   c1_bus_grant,
     input  wire                  c1_snoop_hit,
     input  wire [DATA_WIDTH-1:0] c1_snoop_wdata_out,
+    input  wire                  c1_snoop_busy,
     
     // Cổng phát tín hiệu Snoop tới ngược lại Core 0
     output reg [2:0]            c0_snoop_cmd,
@@ -104,11 +106,9 @@ module bus_arbiter #(
                 end 
                 else if (c0_bus_req) begin
                     c0_bus_grant <= 1'b1;
-                    last_grant   <= 1'b0; // FIX BUG: Cập nhật last_grant khi Core 0 xin Bus
                 end 
                 else if (c1_bus_req) begin
                     c1_bus_grant <= 1'b1;
-                    last_grant   <= 1'b1; // FIX BUG: Cập nhật last_grant khi Core 1 xin Bus
                 end
             end
         end
@@ -192,41 +192,77 @@ module bus_arbiter #(
         end
     end
 
-    // 5. CỤM GIAO LỘ ĐIỀU HƯỚNG RAM (Memory Multiplexing)
+    // 5. Memory multiplexing. Preserve the non-owner write-back path,
+    // but stall the bus owner while the other cache is handling/flushing snoop.
     always @(*) begin
-        mem_addr     = 0; mem_wdata    = 0;
-        mem_wen      = 1'b0; mem_ren      = 1'b0;
-        c0_mem_ready = 1'b0; c1_mem_ready = 1'b0;
+        mem_addr     = {ADDR_WIDTH{1'b0}};
+        mem_wdata    = {DATA_WIDTH{1'b0}};
+        mem_wen      = 1'b0;
+        mem_ren      = 1'b0;
+        c0_mem_ready = 1'b0;
+        c1_mem_ready = 1'b0;
 
         if (wb_active) begin
-            mem_addr  = wb_addr; mem_wdata = wb_wdata;
-            mem_wen   = 1'b1;    mem_ren   = 1'b0;
-            c0_mem_ready = mem_ready; c1_mem_ready = mem_ready;
-        end 
-        else if (c0_bus_grant_q && c1_mem_wen) begin
-            mem_addr     = c1_mem_addr; mem_wdata    = c1_mem_wdata;
-            mem_wen      = 1'b1;        mem_ren      = 1'b0;
-            c0_mem_ready = 1'b0;        c1_mem_ready = mem_ready;
-        end 
-        else if (c1_bus_grant_q && c0_mem_wen) begin
-            mem_addr     = c0_mem_addr; mem_wdata    = c0_mem_wdata;
-            mem_wen      = 1'b1;        mem_ren      = 1'b0;
-            c0_mem_ready = mem_ready;   c1_mem_ready = 1'b0; 
-        end 
-        else begin
+            // Buffered write from the non-owner.
+            mem_addr  = wb_addr;
+            mem_wdata = wb_wdata;
+            mem_wen   = 1'b1;
+            mem_ren   = 1'b0;
+
             if (c0_bus_grant_q) begin
-                mem_addr     = c0_mem_addr; mem_wdata    = c0_mem_wdata;
-                mem_wen      = c0_mem_wen;  mem_ren      = c0_mem_ren;
-                c0_mem_ready = mem_ready;   c1_mem_ready = 1'b0;
-            end 
-            else if (c1_bus_grant_q) begin
-                mem_addr     = c1_mem_addr; mem_wdata    = c1_mem_wdata;
-                mem_wen      = c1_mem_wen;  mem_ren      = c1_mem_ren;
-                c0_mem_ready = 1'b0;        c1_mem_ready = mem_ready;
-            end 
-            else begin
-                c0_mem_ready = mem_ready; c1_mem_ready = mem_ready;
+                c0_mem_ready = mem_ready && !c1_snoop_busy;
+                c1_mem_ready = mem_ready;
+            end else if (c1_bus_grant_q) begin
+                c0_mem_ready = mem_ready;
+                c1_mem_ready = mem_ready && !c0_snoop_busy;
+            end else begin
+                c0_mem_ready = mem_ready;
+                c1_mem_ready = mem_ready;
             end
         end
+        // Core 0 owns the bus, while Core 1 is writing back a snooped line.
+        else if (c0_bus_grant_q && c1_mem_wen) begin
+            mem_addr     = c1_mem_addr;
+            mem_wdata    = c1_mem_wdata;
+            mem_wen      = 1'b1;
+            mem_ren      = 1'b0;
+            c0_mem_ready = 1'b0;
+            c1_mem_ready = mem_ready;
+        end
+        // Core 1 owns the bus, while Core 0 is writing back a snooped line.
+        else if (c1_bus_grant_q && c0_mem_wen) begin
+            mem_addr     = c0_mem_addr;
+            mem_wdata    = c0_mem_wdata;
+            mem_wen      = 1'b1;
+            mem_ren      = 1'b0;
+            c0_mem_ready = mem_ready;
+            c1_mem_ready = 1'b0;
+        end
+        // Normal transaction from the Core 0 bus owner.
+        else if (c0_bus_grant_q) begin
+            mem_addr  = c0_mem_addr;
+            mem_wdata = c0_mem_wdata;
+            mem_wen   = c0_mem_wen;
+            mem_ren   = c0_mem_ren && !c1_snoop_busy;
+
+            c0_mem_ready = mem_ready && !c1_snoop_busy;
+            c1_mem_ready = 1'b0;
+        end
+        // Normal transaction from the Core 1 bus owner.
+        else if (c1_bus_grant_q) begin
+            mem_addr  = c1_mem_addr;
+            mem_wdata = c1_mem_wdata;
+            mem_wen   = c1_mem_wen;
+            mem_ren   = c1_mem_ren && !c0_snoop_busy;
+
+            c0_mem_ready = 1'b0;
+            c1_mem_ready = mem_ready && !c0_snoop_busy;
+        end
+        // No active owner (kept compatible with the original DA1 behavior).
+        else begin
+            c0_mem_ready = mem_ready;
+            c1_mem_ready = mem_ready;
+        end
     end
+
 endmodule
