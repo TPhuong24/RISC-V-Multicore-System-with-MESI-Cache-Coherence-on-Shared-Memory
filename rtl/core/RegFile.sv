@@ -34,11 +34,11 @@ module RegFile#(
             if (rst==1'b1)
                 for (i=0;i<NUM_REGS;i=i+1)
                     register_file[i] <= 0;                 // Reset all registers to 0
-            else if (rst==1'b0 && rg_wrt_en==1'b1)
+            else if (rst==1'b0 && rg_wrt_en==1'b1 && rg_wrt_dest!={ADDRESS_WIDTH{1'b0}})
                 register_file[rg_wrt_dest] <=rg_wrt_data;  // Write rg_wrt_data to register_file[rg_wrt_dest]
         end
 
-    assign rg_rd_data1 = register_file[rg_rd_addr1];  // Read rg_rd_addr1 from register_file and assign it to rg_rd_data1
-    assign rg_rd_data2 = register_file[rg_rd_addr2];  // Read rg_rd_addr2 from register_file and assign it to rg_rd_data2
+    assign rg_rd_data1 = (rg_rd_addr1=={ADDRESS_WIDTH{1'b0}}) ? {DATA_WIDTH{1'b0}} : register_file[rg_rd_addr1];
+    assign rg_rd_data2 = (rg_rd_addr2=={ADDRESS_WIDTH{1'b0}}) ? {DATA_WIDTH{1'b0}} : register_file[rg_rd_addr2];
 
 endmodule

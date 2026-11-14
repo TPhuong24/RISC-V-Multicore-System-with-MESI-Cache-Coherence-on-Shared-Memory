@@ -16,56 +16,35 @@ module alu#(
         output logic zero
         );
 
-        integer  i;
+        always_comb begin
+            ALUResult = '0;
+            // Comparison flags are derived from operands, not from the sign
+            // of a potentially-overflowed subtraction result.
+            Con_BLT = ($signed(SrcA) < $signed(SrcB));
+            Con_BGT = ($signed(SrcA) > $signed(SrcB));
+            zero = (SrcA == SrcB);
 
-        always_comb
-            begin
-                ALUResult = 'd0;
-                Con_BLT   = 'b0;
-                Con_BGT   = 'b0;
-                zero      = 'b0;
-
-                case(Operation)
-                    /////////////////////////////////////////////////////////////
-                    4'b0000:       // AND
-                            ALUResult = SrcA & SrcB;
-                    4'b0001:       // OR
-                            ALUResult = SrcA | SrcB;
-                    4'b0011:       // XOR
-                            ALUResult = SrcA ^ SrcB;
-                    /////////////////////////////////////////////////////////////
-                    4'b0010:       // ADD
-                            ALUResult = SrcA + SrcB;
-                    4'b0110:       // SUB (Subtract signed)
-                        begin       
-                            ALUResult = $signed(SrcA)       -  $signed(SrcB) ;
-                            Con_BLT   = ($signed(ALUResult) <  $signed(1'd0));
-                            Con_BGT   = ($signed(ALUResult) >  $signed(1'd0));
-                            zero      = ($signed(ALUResult) == $signed(1'd0));
-                        end
-                    4'b0111:
-                        begin      // SUBU (Subtract unsigned)
-                            ALUResult = SrcA - SrcB;
-                            Con_BLT   = SrcA < SrcB;
-                            Con_BGT   = SrcA > SrcB;
-                            zero      = (ALUResult == 1'd0);
-                        end
-                    /////////////////////////////////////////////////////////////
-                    4'b0100:       // SLL (Shift left logical)
-                            ALUResult = SrcA << SrcB;
-                    4'b1000:       // SRL (Shift right logical)
-                            ALUResult = SrcA >> SrcB;
-                    4'b1100:       // SRA (Shift right arithmetic)
-                            ALUResult = $signed(SrcA) >>> SrcB;
-                    /////////////////////////////////////////////////////////////
-                    4'b0101:       // SLTU (Set on less than) (unsigned)
-                            ALUResult = ($unsigned(SrcA)<$unsigned(SrcB));
-                    4'b1010:       // SLT  (Set on less than) (signed)
-                            ALUResult = ($signed(SrcA)<$signed(SrcB));
-                    /////////////////////////////////////////////////////////////
-                    default:       // Default
-                            ALUResult = 'b0;
-                    /////////////////////////////////////////////////////////////
-                endcase
-            end
+            case (Operation)
+                4'b0000: ALUResult = SrcA & SrcB; // AND
+                4'b0001: ALUResult = SrcA | SrcB; // OR
+                4'b0010: ALUResult = SrcA + SrcB; // ADD
+                4'b0011: ALUResult = SrcA ^ SrcB; // XOR
+                4'b0100: ALUResult = SrcA << SrcB[4:0]; // SLL
+                4'b0101: ALUResult = ($unsigned(SrcA) < $unsigned(SrcB)); // SLTU
+                4'b0110: ALUResult = SrcA - SrcB; // SUB
+                4'b0111: ALUResult = SrcA - SrcB; // legacy unsigned SUB encoding
+                4'b1000: ALUResult = SrcA >> SrcB[4:0]; // SRL
+                4'b1010: ALUResult = ($signed(SrcA) < $signed(SrcB)); // SLT
+                4'b1100: begin
+                    if (SrcB[4:0] == 5'd0)
+                        ALUResult = SrcA;
+                    else if (SrcA[DATA_WIDTH-1] == 1'b1)
+                        ALUResult = (SrcA >> SrcB[4:0])
+                                  | ({DATA_WIDTH{1'b1}} << (DATA_WIDTH - SrcB[4:0]));
+                    else
+                        ALUResult = SrcA >> SrcB[4:0];
+                end // SRA
+                default: ALUResult = '0;
+            endcase
+        end
 endmodule

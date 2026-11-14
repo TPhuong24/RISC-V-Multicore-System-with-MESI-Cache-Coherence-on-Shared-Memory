@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module Datapath#(
-    parameter PC_W = 9,          // Program Counter Width
+    parameter PC_W = 32,         // Program Counter Width
     parameter INS_W = 32,        // Instruction Width
     parameter RF_ADDRESS = 5,    // Register File Address
     parameter DATA_W = 32,       // Data WriteData
@@ -49,20 +49,18 @@ module Datapath#(
     );
 
     // Defining the datapath signals (ports)
-    logic [8:0]  PC, PCPlus4, PCValue, BranchPC;
+    logic [31:0] PC, PCPlus4, PCValue, BranchPC;
     logic [31:0] Instr, PCPlusImm, PCJalr, LD, ST, Store_data;
     logic [31:0] Result;
     logic [31:0] Reg1, Reg2;
     logic [31:0] ReadData;
     logic [31:0] SrcB, ALUResult;
     logic [31:0] ExtImm;
-    logic [31:0] PC_unsign_extend;
     logic [31:0] Read_Alu_Result, Jal_test, aui_data, lui_data;
     logic [1:0] PCSel;
-    logic zero, Con_BLT, Con_BGT, Jalr, Branch; 
+    logic zero, Con_BLT, Con_BGT, Jalr, Branch, branch_taken;
 
-    assign PC_unsign_extend = {23'b0, PC};
-    assign Branch = (Con_beq&&zero)||(Con_bnq&&!zero)||(Con_bgt&&Con_BGT)||(Con_blt&&Con_BLT)||Jal;
+    assign Branch = branch_taken || Jal;
     assign Jalr = Con_Jalr;
 
     // Extracting the instruction opcode, funct7, and funct3 from the instruction
@@ -70,35 +68,43 @@ module Datapath#(
     assign Funct7 = Instr[31:25];
     assign Funct3 = Instr[14:12];
 
-    // PCPlus4 = PC + 4          (9 bit operation)
-    adder #(9) pcadd1 (PC, 9'b100, PCPlus4);  
+    // All PC arithmetic, branch/jump destinations, and links are 32-bit.
+    assign PCPlus4 = PC + 32'd4;
+    assign PCPlusImm = PC + ExtImm;
+    assign PCJalr = (Reg1 + ExtImm) & 32'hFFFF_FFFE;
+    assign BranchPC = Branch ? PCPlusImm : PCPlus4;
+    assign PCValue = Jalr ? PCJalr : BranchPC;
 
-    // PCPusImm = PC_unsign_extend + ExtImm      (32 bit operation)
-    adder_32 #(32) pcadd2 (PC_unsign_extend, ExtImm, PCPlusImm);
-
-    // PCJalr = ExtImm + Reg1                    (32 bit operation)
-    adder_32 #(32) pcadd3 (ExtImm, Reg1, PCJalr);
-
-    // BranchPC = Branch ? PCPlusImm[8:0] : PCPlus4
-    mux2 next_pc1(PCPlus4, PCPlusImm[8:0], Branch, BranchPC);
-
-    // PCValue = Jalr ? PCJalr[8:0] : BranchPC
-    mux2 next_pc2(BranchPC, PCJalr[8:0], Jalr, PCValue);
+    // Branch predicates compare source operands directly. This avoids the
+    // signed-overflow bug from using the sign of (Reg1 - Reg2).
+    always_comb begin
+        branch_taken = 1'b0;
+        if (opcode == 7'b1100011) begin
+            case (Funct3)
+                3'b000: branch_taken = (Reg1 == Reg2); // BEQ
+                3'b001: branch_taken = (Reg1 != Reg2); // BNE
+                3'b100: branch_taken = ($signed(Reg1) < $signed(Reg2)); // BLT
+                3'b101: branch_taken = ($signed(Reg1) >= $signed(Reg2)); // BGE
+                3'b110: branch_taken = ($unsigned(Reg1) < $unsigned(Reg2)); // BLTU
+                3'b111: branch_taken = ($unsigned(Reg1) >= $unsigned(Reg2)); // BGEU
+                default: branch_taken = 1'b0;
+            endcase
+        end
+    end
 
     // ====== [CHỈNH SỬA 2]: ĐIỀU KHIỂN THANH GHI PC DỪNG LẠI KHI BỊ STALL ======
     // Thay thế cục flopr cũ để PC không tự tăng khi hệ thống đang bận đợi Cache gánh Miss
     always_ff @(posedge clk or posedge reset) begin
         if (reset) 
-            PC <= 9'b0;
+            PC <= 32'b0;
         else if (!cpu_stall) // Chỉ cập nhật PCValue mới nếu CPU KHÔNG bị stall
             PC <= PCValue;
     end
 
-    // ====== [CHUYỀN TIẾP TÊN FILE]: Truyền INIT_FILE vào Instruction Memory ======
-    // ĐÃ FIX LỖI (vsim-3015) BẰNG CÁCH NỐI THÊM 23 BIT 0 CHO ĐỦ SIZE 32 BIT
+    // Instruction ROM is indexed by addr[11:2] and accepts the full PC.
     instructionmemory #(
         .INIT_FILE(INIT_FILE)
-    ) instr_mem ({23'b0, PC}, Instr);
+    ) instr_mem (PC, Instr);
 
     // Use Instr(Instruction from instruction memory) and Reg2(Data from data memory) to extract the information and assign it to ST
     data_extract store_data_ex(Instr, Reg2, ST);
@@ -120,8 +126,8 @@ module Datapath#(
     // Read_ALU_Result = MemtoReg ? LD : ALUResult
     mux2 #(32) resmux(ALUResult, LD, MemtoReg, Read_Alu_Result);
 
-    // Jal_test = (Jal OR Jalr) ? {23'b0,PCPlus4} : Read_Alu_Result
-    mux2 #(32) resmux_jal(Read_Alu_Result, {23'b0, PCPlus4}, (Jal||Jalr), Jal_test);
+    // JAL/JALR link address is the full-width PC+4.
+    mux2 #(32) resmux_jal(Read_Alu_Result, PCPlus4, (Jal||Jalr), Jal_test);
 
     // aui_data = AUIPC ? PCPlusImm : Jal_test
     mux2 #(32) resmux_auipc(Jal_test, PCPlusImm, AUIPC, aui_data);

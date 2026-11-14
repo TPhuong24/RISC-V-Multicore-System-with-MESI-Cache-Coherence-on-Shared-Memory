@@ -28,10 +28,10 @@ module Controller
             7'b0100011: ctrl_bits = 15'b101001000001000; // SW
             7'b0010011: ctrl_bits = 15'b100100000000100; // RI_TYPE
             7'b1100011: ctrl_bits = 15'b000000101000000; // BR_TYPE
-            7'b1100111: ctrl_bits = 15'b000101000100000; // JALR
+            7'b1100111: ctrl_bits = 15'b000100000100000; // JALR: RegWrite + Con_Jalr
             7'b1101111: ctrl_bits = 15'b000100000010000; // JAL
-            7'b0010111: ctrl_bits = 15'b000000000000010; // AUIPC
-            7'b0110111: ctrl_bits = 15'b000000000000001; // LUI
+            7'b0010111: ctrl_bits = 15'b000100000000010; // AUIPC: RegWrite + Con_AUIPC
+            7'b0110111: ctrl_bits = 15'b000100000000001; // LUI: RegWrite + Con_LUI
             default:    ctrl_bits = 15'b000000000000000; // Tránh Latch tuyệt đối cho các Opcode lạ
         endcase
     end
