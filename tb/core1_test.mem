@@ -4,18 +4,18 @@
 00000013
 00000013
 00000013
-// Step 3: Core 1 Đọc địa chỉ 0x00 -> Snoop Read. Sẽ "giật" được data từ Core 0
+// Step 3: Core 1 Đọc địa chỉ 0x00 -> Snoop Read giật dữ liệu từ Core 0 (M -> S cho cả 2 bên)
 00000103
-// NOPs: Đứng đợi Core 0. Tranh thủ nạp giá trị 0x99 vào thanh ghi x3
+// NOPs: Đứng đợi Core 0 thực hiện Step 4 và Step 5
 00000013
 00000013
 00000013
-09900193
 00000013
 00000013
-// Step 6: Core 1 Ghi địa chỉ 0x10 -> Ghi trượt hoàn toàn. Ghi giá trị x3 (0x00000099)
-00302823
-// NOPs: Đứng đợi Core 0 thực hiện chu kỳ cuối cùng
+00000013
+// Step 6: Core 1 Ghi địa chỉ 0x10 -> Ghi trượt hoàn toàn (I -> M) [Phát lệnh READX để hủy diệt Exclusive của Core 0]
+00002843
+// NOPs: Đứng đợi Core 0 thực hiện chu kỳ cuối cùng (Step 7: Eviction Write-back)
 00000013
 00000013
 00000013

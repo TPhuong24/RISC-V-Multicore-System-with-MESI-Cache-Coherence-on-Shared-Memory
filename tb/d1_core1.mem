@@ -1,0 +1,8 @@
+// D1 Core 1: wait for flag at 0x10, then read all four words in line 0.
+01002283
+FE028EE3
+00002303
+00402383
+00802403
+00C02483
+0000006F
