@@ -3,10 +3,14 @@
 // =============================================================================
 `timescale 1ns/1ps
 
-module top_multicore (
+module top_multicore #(
+    parameter CORE0_INIT_FILE = "core0_test.mem",
+    parameter CORE1_INIT_FILE = "core1_test.mem"
+)(
     input  wire clk,
     input  wire rst_n,
     
+    // ====== [CHỈNH SỬA QUAN TRỌNG]: THÊM OUTPUT ĐỂ QUARTUS KHÔNG XÓA MẠCH ======
     output wire [31:0] out_core0_wb_data,
     output wire [31:0] out_core1_wb_data
 );
@@ -49,11 +53,13 @@ module top_multicore (
     wire [2:0]  c0_bus_cmd;   wire [31:0] c0_bus_addr, c0_bus_wdata; wire c0_bus_req, c0_bus_grant;
     wire [2:0]  c0_snoop_cmd; wire [31:0] c0_snoop_addr; wire c0_snoop_hit, c0_other_has_copy;
     wire [31:0] c0_snoop_wdata_out, c0_other_flush_data;
+    wire        c0_snoop_busy;
     wire [31:0] c0_mem_addr, c0_mem_wdata, c0_mem_rdata; wire c0_mem_wen, c0_mem_ren, c0_mem_ready;
 
     wire [2:0]  c1_bus_cmd;   wire [31:0] c1_bus_addr, c1_bus_wdata; wire c1_bus_req, c1_bus_grant;
     wire [2:0]  c1_snoop_cmd; wire [31:0] c1_snoop_addr; wire c1_snoop_hit, c1_other_has_copy;
     wire [31:0] c1_snoop_wdata_out, c1_other_flush_data;
+    wire        c1_snoop_busy;
     wire [31:0] c1_mem_addr, c1_mem_wdata, c1_mem_rdata; wire c1_mem_wen, c1_mem_ren, c1_mem_ready;
 
     // ====== ĐƯỜNG DÂY BUS CHÍNH (MASTER BUS) SAU KHI QUA ARBITER ======
@@ -67,7 +73,7 @@ module top_multicore (
     // LÕI XỬ LÝ SỐ 0 (CORE 0) VÀ KHỐI L1 CACHE 0
     // -------------------------------------------------------------------------
     RISC_V #(
-        .INIT_FILE("core0_test.mem")
+        .INIT_FILE(CORE0_INIT_FILE)
     ) core_0 (
         .clk(clk), .reset(~rst_n),
         .cpu_mem_addr(c0_cpu_addr), .cpu_mem_wdata(c0_cpu_wdata),
@@ -96,6 +102,7 @@ module top_multicore (
         
         .snoop_cmd(c0_snoop_cmd), .snoop_addr(c0_snoop_addr), .snoop_hit(c0_snoop_hit),
         .snoop_wdata_out(c0_snoop_wdata_out), .snoop_ack(),
+        .snoop_busy(c0_snoop_busy),
         .other_has_copy(c0_other_has_copy), .other_flush_data(c0_other_flush_data),
         
         .bus_cmd(c0_bus_cmd), .bus_addr(c0_bus_addr), .bus_wdata(c0_bus_wdata),
@@ -127,7 +134,7 @@ module top_multicore (
     // LÕI XỬ LÝ SỐ 1 (CORE 1) VÀ KHỐI L1 CACHE 1
     // -------------------------------------------------------------------------
     RISC_V #(
-        .INIT_FILE("core1_test.mem")
+        .INIT_FILE(CORE1_INIT_FILE)
     ) core_1 (
         .clk(clk), .reset(~rst_n),
         .cpu_mem_addr(c1_cpu_addr), .cpu_mem_wdata(c1_cpu_wdata),
@@ -156,6 +163,7 @@ module top_multicore (
         
         .snoop_cmd(c1_snoop_cmd), .snoop_addr(c1_snoop_addr), .snoop_hit(c1_snoop_hit),
         .snoop_wdata_out(c1_snoop_wdata_out), .snoop_ack(),
+        .snoop_busy(c1_snoop_busy),
         .other_has_copy(c1_other_has_copy), .other_flush_data(c1_other_flush_data),
         
         .bus_cmd(c1_bus_cmd), .bus_addr(c1_bus_addr), .bus_wdata(c1_bus_wdata),
@@ -192,10 +200,12 @@ module top_multicore (
         .c0_bus_cmd(c0_bus_cmd), .c0_bus_addr(c0_bus_addr), .c0_bus_wdata(c0_bus_wdata),
         .c0_bus_req(c0_bus_req), .c0_bus_grant(c0_bus_grant), .c0_snoop_hit(c0_snoop_hit),
         .c0_snoop_wdata_out(c0_snoop_wdata_out),
+        .c0_snoop_busy(c0_snoop_busy),
         
         .c1_bus_cmd(c1_bus_cmd), .c1_bus_addr(c1_bus_addr), .c1_bus_wdata(c1_bus_wdata),
         .c1_bus_req(c1_bus_req), .c1_bus_grant(c1_bus_grant), .c1_snoop_hit(c1_snoop_hit),
         .c1_snoop_wdata_out(c1_snoop_wdata_out),
+        .c1_snoop_busy(c1_snoop_busy),
         
         .c0_snoop_cmd(c0_snoop_cmd), .c0_snoop_addr(c0_snoop_addr),
         .c0_other_has_copy(c0_other_has_copy), .c0_other_flush_data(c0_other_flush_data),
