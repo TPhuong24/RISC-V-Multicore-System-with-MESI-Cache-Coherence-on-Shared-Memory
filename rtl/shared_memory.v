@@ -3,7 +3,8 @@
 module shared_memory #(
     parameter ADDR_WIDTH = 32,
     parameter DATA_WIDTH = 32,
-    parameter MEM_SIZE   = 1024   // Kích thước RAM: 1024 từ mã (Words) tương đương 4KB
+    parameter MEM_SIZE   = 1024,  // 1024 words = 4 KB when DATA_WIDTH = 32
+    parameter INIT_FILE  = ""     // Optional hexadecimal initialization file
 )(
     input  wire                  clk,
     input  wire                  rst_n,
@@ -24,39 +25,36 @@ module shared_memory #(
     // Thêm thuộc tính (* ramstyle = "M4K" *) để ép Quartus sử dụng Block RAM chuyên dụng thay vì dùng Register (Flip-flop)
     (* ramstyle = "M4K" *) reg [DATA_WIDTH-1:0] main_ram [0:MEM_SIZE-1];
 
-    // ==========================================================
-    // KHỞI TẠO DỮ LIỆU MỒI CHO RAM (CHỈ DÙNG TRONG MÔ PHỎNG)
-    // ==========================================================
-    integer i;
-    initial begin
-        for (i = 0; i < MEM_SIZE; i = i + 1) begin
-            // Nạp giá trị ban đầu: 0xAABBCCDD cộng thêm offset là địa chỉ i
-            // VD: Ô nhớ 0 chứa AABBCCDD, ô 1 chứa AABBCCDE, ô 2 chứa AABBCCDF,...
-            main_ram[i] = 32'hAABBCCDD + i; 
+    // Initialize every word to zero, then optionally load a memory image.
+    integer init_idx;
+    initial begin : init_main_ram
+        for (init_idx = 0; init_idx < MEM_SIZE; init_idx = init_idx + 1) begin
+            main_ram[init_idx] = {DATA_WIDTH{1'b0}};
+        end
+
+        if (INIT_FILE != "") begin
+            $readmemh(INIT_FILE, main_ram);
         end
     end
-    // ==========================================================
 
-    // Khối 1: Xử lý tín hiệu điều khiển Ready (Cần reset bất đồng bộ để tránh treo mạch lúc khởi động)
+    // Ready is a one-cycle pulse for each continuously-held request.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             mem_ready <= 1'b0;
         end else begin
-            if (mem_wen || mem_ren) begin
-                mem_ready <= 1'b1; // Báo hiệu đã xử lý xong yêu cầu RAM
-            end else begin
-                mem_ready <= 1'b0; // Hạ ready xuống nếu không có yêu cầu đọc/ghi
-            end
+            mem_ready <= (mem_wen || mem_ren) && !mem_ready;
         end
     end
 
-    // Khối 2: Đọc/Ghi dữ liệu RAM tuần tự (KHÔNG ĐƯỢC chứa rst_n để Quartus hiểu đây là Block RAM thật)
+    // Perform read/write side effects only on the first request cycle,
+    // when the current ready value is low.
     always @(posedge clk) begin
-        if (mem_wen) begin
-            main_ram[mem_addr[INDEX_BITS+1 : 2]] <= mem_wdata; 
+        if (mem_wen && !mem_ready) begin
+            main_ram[mem_addr[INDEX_BITS+1:2]] <= mem_wdata;
         end
-        if (mem_ren) begin
-            mem_rdata <= main_ram[mem_addr[INDEX_BITS+1 : 2]];
+
+        if (mem_ren && !mem_ready) begin
+            mem_rdata <= main_ram[mem_addr[INDEX_BITS+1:2]];
         end
     end
 
