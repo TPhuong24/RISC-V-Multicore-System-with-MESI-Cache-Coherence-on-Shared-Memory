@@ -63,6 +63,7 @@ module cache_controller #(
     output reg                   snoop_ack,
     output reg                   snoop_hit,
     output reg  [DATA_WIDTH-1:0]   snoop_wdata_out,
+    output reg                   snoop_busy,
 
     // Memory
     output reg  [ADDR_WIDTH-1:0]   mem_addr,
@@ -88,7 +89,7 @@ module cache_controller #(
     localparam BUS_READ  = 3'b001;
     localparam BUS_READX = 3'b010;
     localparam BUS_UPGR  = 3'b011;
-    localparam BUS_WB    = 3'b100;
+    localparam BUS_WB    = 3'b100; // Thêm lệnh Write-Back
 
     // Snoop commands
     localparam SNOOP_NONE  = 3'b000;
@@ -106,8 +107,9 @@ module cache_controller #(
     localparam S_FILL_DONE    = 4'd6;
     localparam S_SNOOP_HANDLE = 4'd7;
     localparam S_DONE         = 4'd8;
-    localparam S_EVICT_ARBWAIT= 4'd9; 
-    localparam S_EVICT        = 4'd10;
+    localparam S_EVICT_ARBWAIT= 4'd9;  // Wait for bus before eviction write-back
+    localparam S_EVICT        = 4'd10; // Write an evicted line back to RAM
+    localparam S_SNOOP_FLUSH  = 4'd11; // Write all words of a Modified snoop hit
 
     reg [3:0] state;
 
@@ -117,20 +119,42 @@ module cache_controller #(
 
     reg [2:0] latched_snoop_cmd;
     reg [ADDR_WIDTH-1:0] latched_snoop_addr;
+    reg snoop_serviced;
+
+    // The arbiter holds a snoop command for the lifetime of its bus grant.
+    // Service that command once, even if HANDLE/FLUSH finishes before the
+    // requesting core releases the bus. A changed command/address is new.
+    wire snoop_new = (snoop_cmd != SNOOP_NONE) &&
+                     ((!snoop_serviced) ||
+                      (snoop_cmd != latched_snoop_cmd) ||
+                      (snoop_addr != latched_snoop_addr));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             latched_snoop_cmd  <= SNOOP_NONE;
-            latched_snoop_addr <= 0;
-        end else if (snoop_cmd != SNOOP_NONE) begin
-            latched_snoop_cmd  <= snoop_cmd;
-            latched_snoop_addr <= snoop_addr;
+            latched_snoop_addr <= {ADDR_WIDTH{1'b0}};
+            snoop_serviced     <= 1'b0;
+        end else begin
+            if (snoop_cmd == SNOOP_NONE) begin
+                snoop_serviced <= 1'b0;
+            end else if (state == S_SNOOP_HANDLE) begin
+                snoop_serviced <= 1'b1;
+            end
+
+            if (snoop_new &&
+                state != S_SNOOP_HANDLE &&
+                state != S_SNOOP_FLUSH) begin
+                latched_snoop_cmd  <= snoop_cmd;
+                latched_snoop_addr <= snoop_addr;
+            end
         end
     end
 
-    wire use_latched = (state == S_SNOOP_HANDLE) && (snoop_cmd == SNOOP_NONE);
+    wire use_latched = (state == S_SNOOP_HANDLE) ||
+                       (state == S_SNOOP_FLUSH);
     wire [2:0] cur_snoop_cmd = use_latched ? latched_snoop_cmd : snoop_cmd;
-    wire [ADDR_WIDTH-1:0] cur_snoop_addr = use_latched ? latched_snoop_addr : snoop_addr;
+    wire [ADDR_WIDTH-1:0] cur_snoop_addr =
+        use_latched ? latched_snoop_addr : snoop_addr;
 
     wire [ADDR_WIDTH-1:0] active_addr = (state == S_IDLE) ? cpu_addr : saved_addr;
     wire [OFFSET_BITS-1:0] a_offset = active_addr[OFFSET_BITS+1:2];
@@ -142,8 +166,8 @@ module cache_controller #(
     wire [TAG_BITS-1:0]    snp_tag    = cur_snoop_addr[ADDR_WIDTH-1:INDEX_BITS+OFFSET_BITS+2];
 
     reg [OFFSET_BITS-1:0] fill_cnt;
-    reg [OFFSET_BITS-1:0] evict_cnt; 
-    reg [OFFSET_BITS-1:0] snoop_cnt; // Đếm số word đã đẩy ra khi dính Snoop
+    reg [OFFSET_BITS-1:0] evict_cnt;
+    reg [OFFSET_BITS-1:0] flush_cnt;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -153,15 +177,16 @@ module cache_controller #(
             saved_wen   <= 0;
             fill_cnt    <= 0;
             evict_cnt   <= 0;
-            snoop_cnt   <= 0;
+            flush_cnt   <= 0;
         end else begin
-            if (snoop_cmd != SNOOP_NONE && state != S_SNOOP_HANDLE) begin
-                state     <= S_SNOOP_HANDLE;
-                snoop_cnt <= 0; // Reset biến đếm snoop
+            if (snoop_new &&
+                state != S_SNOOP_HANDLE &&
+                state != S_SNOOP_FLUSH) begin
+                state <= S_SNOOP_HANDLE;
             end else begin
                 case (state)
                     S_IDLE: begin
-                        if (cpu_ren || cpu_wen) begin
+                        if (snoop_cmd == SNOOP_NONE && (cpu_ren || cpu_wen)) begin
                             saved_addr  <= cpu_addr;
                             saved_wdata <= cpu_wdata;
                             saved_wen   <= cpu_wen;
@@ -176,6 +201,7 @@ module cache_controller #(
                             else
                                 state <= S_HIT;
                         end else begin
+                            // Kiểm tra nếu block cũ đang bị bẩn (Dirty/Modified) -> Cần Evict
                             if (ctrl_valid_out && ctrl_mesi_out == MODIFIED) begin
                                 state <= S_EVICT_ARBWAIT;
                             end else begin
@@ -221,25 +247,33 @@ module cache_controller #(
                     end
 
                     S_FILL_DONE: state <= S_DONE;
-
                     S_DONE: state <= S_IDLE;
 
                     S_SNOOP_HANDLE: begin
-                        // Nếu cần xả data (MODIFIED), lặp cho đến khi hết block
-                        if (snoop_valid_out && snoop_tag_out == snp_tag && snoop_mesi_out == MODIFIED && (cur_snoop_cmd == SNOOP_READ || cur_snoop_cmd == SNOOP_READX || cur_snoop_cmd == SNOOP_UPGR)) begin
-                            if (mem_ready) begin
-                                if (snoop_cnt == BLOCK_WORDS - 1) begin
-                                    state <= S_IDLE; 
-                                end else begin
-                                    snoop_cnt <= snoop_cnt + 1;
-                                end
-                            end
+                        if (snoop_valid_out &&
+                            (snoop_tag_out == snp_tag) &&
+                            (snoop_mesi_out == MODIFIED) &&
+                            ((cur_snoop_cmd == SNOOP_READ)  ||
+                             (cur_snoop_cmd == SNOOP_READX) ||
+                             (cur_snoop_cmd == SNOOP_UPGR))) begin
+                            flush_cnt <= {OFFSET_BITS{1'b0}};
+                            state     <= S_SNOOP_FLUSH;
                         end else begin
-                            // Nếu không phải MODIFIED, chỉ cần cập nhật trạng thái trong 1 cycle
                             state <= S_IDLE;
                         end
                     end
-                    
+
+                    S_SNOOP_FLUSH: begin
+                        if (mem_ready) begin
+                            if (flush_cnt == BLOCK_WORDS - 1) begin
+                                flush_cnt <= {OFFSET_BITS{1'b0}};
+                                state     <= S_IDLE;
+                            end else begin
+                                flush_cnt <= flush_cnt + 1'b1;
+                            end
+                        end
+                    end
+
                     default: state <= S_IDLE;
                 endcase
             end
@@ -258,15 +292,20 @@ module cache_controller #(
         mem_ren         = 0;
         cpu_stall       = (state != S_DONE && state != S_IDLE) || (state == S_IDLE && (cpu_ren || cpu_wen)) || (cur_snoop_cmd != SNOOP_NONE);
 
-        if ((state == S_SNOOP_HANDLE) || (cur_snoop_cmd != SNOOP_NONE)) begin
+        if (state == S_SNOOP_FLUSH) begin
             ctrl_index  = snp_index;
-            // Ép offset chạy theo snoop_cnt nếu đang xả block MODIFIED
-            ctrl_offset = (state == S_SNOOP_HANDLE && snoop_mesi_out == MODIFIED) ? snoop_cnt : snp_offset;
-            ctrl_tag_in = snp_tag;      
+            ctrl_offset = flush_cnt;
+            ctrl_tag_in = snp_tag;
+            snoop_index = snp_index;
+        end else if ((state == S_SNOOP_HANDLE) ||
+                     (cur_snoop_cmd != SNOOP_NONE)) begin
+            ctrl_index  = snp_index;
+            ctrl_offset = snp_offset;
+            ctrl_tag_in = snp_tag;
             snoop_index = snp_index;
         end else if (state == S_EVICT) begin
             ctrl_index  = a_index;
-            ctrl_offset = evict_cnt;
+            ctrl_offset = evict_cnt; // Đọc tuần tự các word để hất văng
             ctrl_tag_in = a_tag;
             snoop_index = a_index;
         end else begin
@@ -283,9 +322,11 @@ module cache_controller #(
         ctrl_dirty_in   = 0;
         ctrl_mesi_in    = INVALID;
         ctrl_mesi_we    = 0;
-        snoop_ack       = 0;
-        snoop_hit       = 0;
-        snoop_wdata_out = 0;
+        snoop_ack       = 1'b0;
+        snoop_hit       = 1'b0;
+        snoop_wdata_out = {DATA_WIDTH{1'b0}};
+        snoop_busy      = (state == S_SNOOP_HANDLE) ||
+                          (state == S_SNOOP_FLUSH);
 
         // BUS LOCK LOGIC
         if (state == S_MISS_ARBWAIT || state == S_FETCH || state == S_FILL_DONE) begin
@@ -299,6 +340,7 @@ module cache_controller #(
         end else if (state == S_EVICT_ARBWAIT || state == S_EVICT) begin
             bus_req  = 1'b1;
             bus_cmd  = BUS_WB;
+            // Địa chỉ eviction dựa trên block cũ
             bus_addr = {ctrl_tag_out, a_index, 4'b0000}; 
         end
 
@@ -340,14 +382,7 @@ module cache_controller #(
                 if (mem_ready) begin
                     ctrl_index  = a_index;
                     ctrl_offset = fill_cnt;
-                    
-                    // ==========================================================
-                    // [ĐÃ SỬA LỖI DATA PATH CHỖ NÀY] 
-                    // Lấy dữ liệu trực tiếp từ snoop bus (Cache-to-Cache) 
-                    // nếu có Core khác nhả ra, ngược lại mới lấy từ RAM
-                    // ==========================================================
-                    ctrl_wdata  = other_has_copy ? other_flush_data : mem_rdata;
-                    
+                    ctrl_wdata  = mem_rdata;
                     ctrl_we     = 1'b1;
                 end
             end
@@ -373,40 +408,29 @@ module cache_controller #(
             end
             S_SNOOP_HANDLE: begin
                 snoop_ack = 1'b1;
-                if (snoop_valid_out && snoop_tag_out == snp_tag && snoop_mesi_out != INVALID) begin
+
+                if (snoop_valid_out &&
+                    (snoop_tag_out == snp_tag) &&
+                    (snoop_mesi_out != INVALID)) begin
                     snoop_hit = 1'b1;
+
                     case (cur_snoop_cmd)
                         SNOOP_READ: begin
                             if (snoop_mesi_out == MODIFIED) begin
+                                // Forward the requested word to the arbiter.
+                                // Full-line write-back occurs in S_SNOOP_FLUSH.
                                 snoop_wdata_out = ctrl_rdata;
-                                mem_addr        = {cur_snoop_addr[ADDR_WIDTH-1 : OFFSET_BITS+2], snoop_cnt, 2'b00};
-                                mem_wdata       = ctrl_rdata;
-                                mem_wen         = 1'b1;
-                                
-                                if (snoop_cnt == BLOCK_WORDS - 1) begin
-                                    ctrl_mesi_in  = SHARED;
-                                    ctrl_mesi_we  = 1'b1;
-                                    ctrl_dirty_we = 1'b1;
-                                    ctrl_dirty_in = 1'b0;
-                                end
                             end else if (snoop_mesi_out == EXCLUSIVE) begin
-                                ctrl_mesi_in  = SHARED;
-                                ctrl_mesi_we  = 1'b1;
+                                ctrl_mesi_in = SHARED;
+                                ctrl_mesi_we = 1'b1;
                             end
                         end
-                        SNOOP_READX, SNOOP_UPGR: begin
+
+                        SNOOP_READX,
+                        SNOOP_UPGR: begin
                             if (snoop_mesi_out == MODIFIED) begin
+                                // Keep the line Modified until all words flush.
                                 snoop_wdata_out = ctrl_rdata;
-                                mem_addr        = {cur_snoop_addr[ADDR_WIDTH-1 : OFFSET_BITS+2], snoop_cnt, 2'b00};
-                                mem_wdata       = ctrl_rdata;
-                                mem_wen         = 1'b1;
-                                
-                                if (snoop_cnt == BLOCK_WORDS - 1) begin
-                                    ctrl_mesi_in  = INVALID;
-                                    ctrl_mesi_we  = 1'b1;
-                                    ctrl_dirty_we = 1'b1;
-                                    ctrl_dirty_in = 1'b0;
-                                end
                             end else begin
                                 ctrl_mesi_in  = INVALID;
                                 ctrl_mesi_we  = 1'b1;
@@ -414,8 +438,28 @@ module cache_controller #(
                                 ctrl_dirty_in = 1'b0;
                             end
                         end
+
                         default: ;
                     endcase
+                end
+            end
+
+            S_SNOOP_FLUSH: begin
+                // The selected cache offset is flush_cnt.
+                mem_addr  = {snp_tag, snp_index, flush_cnt, 2'b00};
+                mem_wdata = ctrl_rdata;
+                mem_wen   = 1'b1;
+
+                // MESI changes only after the last word's ready handshake.
+                if (mem_ready && (flush_cnt == BLOCK_WORDS - 1)) begin
+                    ctrl_dirty_we = 1'b1;
+                    ctrl_dirty_in = 1'b0;
+                    ctrl_mesi_we  = 1'b1;
+                    if (cur_snoop_cmd == SNOOP_READ) begin
+                        ctrl_mesi_in = SHARED;
+                    end else begin
+                        ctrl_mesi_in = INVALID;
+                    end
                 end
             end
             default: ;
